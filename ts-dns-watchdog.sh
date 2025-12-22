@@ -45,9 +45,20 @@ log_message() {
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     echo "[$timestamp] [$SCRIPT_NAME] [$level] $message" >&2
     
+    # Map script log levels to systemd priorities
+    local sysd_priority
+    case "$level" in
+        debug)   sysd_priority="debug" ;;
+        info)    sysd_priority="info" ;;
+        notice)  sysd_priority="notice" ;;
+        warning) sysd_priority="warning" ;;
+        error)   sysd_priority="err" ;;
+        *)       sysd_priority="info" ;;
+    esac
+    
     # If systemd journal is available, also log to journal
     if command -v systemd-cat >/dev/null 2>&1; then
-        echo "$message" | systemd-cat -t "$SCRIPT_NAME" -p "$level"
+        echo "$message" | systemd-cat -t "$SCRIPT_NAME" -p "$sysd_priority"
     fi
 }
 

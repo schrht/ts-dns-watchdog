@@ -142,12 +142,33 @@ sudo systemctl status ts-dns-watchdog.service
 ### View Logs
 
 ```bash
-# Real-time logs
+# Real-time logs (all levels)
 sudo journalctl -u ts-dns-watchdog.service -f
 
-# Recent logs
+# Real-time logs (exclude debug, show info and above)
+sudo journalctl -u ts-dns-watchdog.service -f -p info
+
+# Real-time logs (only warnings and errors)
+sudo journalctl -u ts-dns-watchdog.service -f -p warning
+
+# Recent logs (all levels)
 sudo journalctl -u ts-dns-watchdog.service -n 100
+
+# Recent logs (exclude debug)
+sudo journalctl -u ts-dns-watchdog.service -n 100 -p info
 ```
+
+**Priority levels** (from lowest to highest):
+- `debug` (7) - Most verbose
+- `info` (6)
+- `notice` (5)
+- `warning` (4)
+- `err` (3)
+- `crit` (2)
+- `alert` (1)
+- `emerg` (0) - Most critical
+
+Using `-p info` shows messages at info level and above (info, notice, warning, err, crit, alert, emerg), excluding debug.
 
 ### Stop Service
 
