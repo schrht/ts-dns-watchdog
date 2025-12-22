@@ -1,0 +1,251 @@
+# Tailscale DNS Watchdog
+
+A watchdog script that automatically detects and fixes DNS fight issues with Tailscale MagicDNS.
+
+> **Note**: This script is a workaround for [Tailscale issue #2334](https://github.com/tailscale/tailscale/issues/2334), which describes DNS configuration synchronization issues when using DirectManager with systems like NetworkManager. This script monitors and automatically fixes DNS fight issues until the upstream issue is resolved.
+
+**Tested on**: Debian GNU/Linux 13 (other distributions should work as well)
+
+## Design Principles
+
+**Trust only `tailscale status --json`, fix configuration first then services, no guessing, no interference, no harm to user intent.**
+
+## Core Features
+
+- ✅ **Strictly based on Tailscale semantics**: All state judgments use only `tailscale status --json`
+- ✅ **Avoid service interruption**: Prioritize soft fixes (restore backup configuration), restart service only when necessary
+- ✅ **Non-intrusive**: Operate only when Tailscale is Running, respect user intent (e.g., `tailscale down`)
+- ✅ **Observable and traceable**: All critical behaviors are logged, supports systemd journal
+- ✅ **Layered fix strategy**: Soft fix → Hard fix, minimizing impact
+
+## How It Works
+
+### State Determination
+
+- **Tailscale running state**: Determined only by `BackendState == "Running"`
+- **DNS fight detection**: Determined only by the keyword "System DNS config not ideal" in the `Health` field
+- **Forbidden methods**: `/etc/resolv.conf` content, `systemctl is-active`, text output guessing
+
+### Backup Strategy
+
+The script deletes any old backups on startup to prevent restoring stale configurations.
+
+Backup generation conditions (**all must be met**):
+1. Tailscale `BackendState == Running`
+2. Currently **no** DNS fight
+3. `/etc/resolv.conf` is clearly a Tailscale-generated file (identified by marker)
+
+Backups are only updated when content changes, avoiding unnecessary writes.
+
+### Fix Strategy
+
+#### 1. Soft Fix (Highest Priority)
+
+**Trigger conditions**:
+- Tailscale Running
+- DNS fight detected
+
+**Behavior**:
+- Overwrite current configuration with backed up Tailscale resolv.conf
+- **Do not restart service**
+- Wait 2 seconds then check again if DNS fight has disappeared
+
+**Result**:
+- DNS fight disappeared → Fix complete ✅
+- Still present → Proceed to hard fix
+
+#### 2. Hard Fix (Fallback)
+
+**Trigger conditions**:
+- Soft fix failed
+
+**Behavior**:
+- Restart `tailscaled` service
+- Force wait 10 seconds
+- Check again if Running and if DNS fight has disappeared
+
+**Retry Strategy**:
+- If hard fix fails, the script uses exponential backoff for retries
+- Retry intervals: 1 minute → 2 minutes → 4 minutes → 8 minutes → 16 minutes → 32 minutes → 1 hour (max)
+- Failure count resets when:
+  - Fix succeeds (soft or hard)
+  - DNS fight disappears
+  - Tailscale is not Running
+
+## Installation
+
+### 1. Install Dependencies
+
+Ensure the system has:
+- `tailscale` CLI
+- `jq` (JSON parsing tool)
+
+```bash
+# Debian/Ubuntu
+sudo apt-get install jq
+
+# RHEL/CentOS
+sudo yum install jq
+
+# macOS (Homebrew)
+brew install jq
+```
+
+### 2. Install Script
+
+```bash
+# Copy script to system path
+sudo cp ts-dns-watchdog.sh /usr/local/bin/
+sudo chmod +x /usr/local/bin/ts-dns-watchdog.sh
+
+# Copy systemd service file
+sudo cp ts-dns-watchdog.service /etc/systemd/system/
+
+# Reload systemd
+sudo systemctl daemon-reload
+
+# Enable and start service
+sudo systemctl enable ts-dns-watchdog.service
+sudo systemctl start ts-dns-watchdog.service
+```
+
+### 3. Configuration (Optional)
+
+Edit the service file to modify check interval:
+
+```bash
+sudo systemctl edit ts-dns-watchdog.service
+```
+
+Add:
+
+```ini
+[Service]
+Environment="CHECK_INTERVAL=60"
+```
+
+Then restart the service:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart ts-dns-watchdog.service
+```
+
+## Usage
+
+### View Service Status
+
+```bash
+sudo systemctl status ts-dns-watchdog.service
+```
+
+### View Logs
+
+```bash
+# Real-time logs
+sudo journalctl -u ts-dns-watchdog.service -f
+
+# Recent logs
+sudo journalctl -u ts-dns-watchdog.service -n 100
+```
+
+### Stop Service
+
+```bash
+sudo systemctl stop ts-dns-watchdog.service
+```
+
+### Disable Service
+
+```bash
+sudo systemctl disable ts-dns-watchdog.service
+```
+
+## Manual Execution (Testing)
+
+```bash
+# Requires root privileges (to modify /etc/resolv.conf)
+sudo /usr/local/bin/ts-dns-watchdog.sh
+
+# Or set custom check interval
+sudo CHECK_INTERVAL=10 /usr/local/bin/ts-dns-watchdog.sh
+```
+
+## Log Examples
+
+```
+[2024-01-15 10:30:00] [ts-dns-watchdog] [info] Starting Tailscale DNS Watchdog (check interval: 30s)
+[2024-01-15 10:30:00] [ts-dns-watchdog] [info] Initializing watchdog: removing any existing backup
+[2024-01-15 10:30:05] [ts-dns-watchdog] [info] Backed up resolv.conf to /etc/resolv.conf.tailscale.backup
+[2024-01-15 10:35:12] [ts-dns-watchdog] [warning] DNS fight detected: System DNS config not ideal
+[2024-01-15 10:35:12] [ts-dns-watchdog] [info] Attempting soft fix: restoring resolv.conf from backup
+[2024-01-15 10:35:14] [ts-dns-watchdog] [info] Soft fix successful: DNS fight resolved
+```
+
+## Security Notes
+
+- The script requires root privileges to modify `/etc/resolv.conf`
+- Recommended to run via systemd service, not direct execution
+- The script checks Tailscale state to avoid operations when `tailscale down`
+
+## Troubleshooting
+
+### Script Cannot Start
+
+1. Check dependencies:
+   ```bash
+   which tailscale
+   which jq
+   ```
+
+2. Check permissions:
+   ```bash
+   ls -l /usr/local/bin/ts-dns-watchdog.sh
+   ```
+
+### Backup Not Generated
+
+- Confirm Tailscale is in Running state: `tailscale status --json | jq .BackendState`
+- Confirm no DNS fight currently: `tailscale status --json | jq .Health`
+- Confirm `/etc/resolv.conf` is a Tailscale-generated file (contains marker)
+
+### Fix Failed
+
+1. View detailed logs:
+   ```bash
+   sudo journalctl -u ts-dns-watchdog.service -n 50
+   ```
+
+2. Manually check Tailscale state:
+   ```bash
+   tailscale status --json | jq '{BackendState, Health}'
+   ```
+
+3. Check backup file:
+   ```bash
+   sudo cat /etc/resolv.conf.tailscale.backup
+   ```
+
+## Design Documentation
+
+This script strictly follows the following requirements:
+
+- ✅ State determination uses only `tailscale status --json`
+- ✅ DNS fight determination uses only the `Health` field
+- ✅ Backup strategy: Delete old backups on startup, generate/update only when conditions are met
+- ✅ Layered fixes: Soft fix prioritized, hard fix as fallback
+- ✅ Functional design: All logic encapsulated as independent functions
+- ✅ Complete logging: All critical behaviors logged with timestamps
+- ✅ Avoid misoperations: No operations when tailscale down
+
+## License
+
+MIT License
+
+## Author & Maintainer
+
+Created and maintained by: Charles Shi <schrht@gmail.com>
+
+## Contributing
+
+Issues and Pull Requests are welcome.
