@@ -43,23 +43,25 @@ log_message() {
     shift
     local message="$*"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp] [$SCRIPT_NAME] [$level] $message" >&2
     
-    # Map script log levels to systemd priorities
-    local sysd_priority
+    # Map script log levels to systemd priority numbers
+    # systemd priorities: 0=emerg, 1=alert, 2=crit, 3=err, 4=warning, 5=notice, 6=info, 7=debug
+    local sysd_priority_num
+    local sysd_priority_name
     case "$level" in
-        debug)   sysd_priority="debug" ;;
-        info)    sysd_priority="info" ;;
-        notice)  sysd_priority="notice" ;;
-        warning) sysd_priority="warning" ;;
-        error)   sysd_priority="err" ;;
-        *)       sysd_priority="info" ;;
+        debug)   sysd_priority_num=7; sysd_priority_name="debug" ;;
+        info)    sysd_priority_num=6; sysd_priority_name="info" ;;
+        notice)  sysd_priority_num=5; sysd_priority_name="notice" ;;
+        warning) sysd_priority_num=4; sysd_priority_name="warning" ;;
+        error)   sysd_priority_num=3; sysd_priority_name="err" ;;
+        *)       sysd_priority_num=6; sysd_priority_name="info" ;;
     esac
     
-    # If systemd journal is available, also log to journal
-    if command -v systemd-cat >/dev/null 2>&1; then
-        echo "$message" | systemd-cat -t "$SCRIPT_NAME" -p "$sysd_priority"
-    fi
+    # Format message with priority for display
+    # Use systemd log format: <priority>message
+    # This format allows systemd to recognize priority while using main process PID
+    # Output to stderr, which systemd captures via StandardError=journal
+    echo "<$sysd_priority_num>[$sysd_priority_name] $message" >&2
 }
 
 # Get tailscale status --json
