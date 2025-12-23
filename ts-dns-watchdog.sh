@@ -97,26 +97,19 @@ is_tailscale_running() {
     fi
 }
 
-# Determine if DNS fight exists
-# Return value: 0=DNS fight exists, 1=No DNS fight
-has_dns_fight() {
-    local status_json
-    if ! status_json=$(get_tailscale_status); then
-        # When unable to get status, conservatively assume no DNS fight (avoid misoperations)
+# Check if resolv.conf has been overwritten (does not contain Tailscale marker)
+# This function only checks the file, does not check Tailscale running state
+# Return value: 0=overwritten (marker not found), 1=contains marker (Tailscale-generated)
+is_resolv_conf_overwritten() {
+    # Directly test if /etc/resolv.conf contains TAILSCALE_MARKER
+    # This is the most common case and has minimal performance cost
+    # If file doesn't exist, grep will fail and return 0 (overwritten)
+    if grep -qi "$TAILSCALE_MARKER" /etc/resolv.conf 2>/dev/null; then
+        # Contains marker, Tailscale-generated, not overwritten
         return 1
-    fi
-    
-    local health
-    if ! health=$(echo "$status_json" | jq -r '.Health // ""' 2>/dev/null); then
-        log_message "error" "Failed to parse Health from status JSON"
-        return 1
-    fi
-    
-    # Check if Health field contains "System DNS config not ideal"
-    if echo "$health" | grep -qi "System DNS config not ideal"; then
-        return 0
     else
-        return 1
+        # Marker not found, resolv.conf has been overwritten
+        return 0
     fi
 }
 
@@ -143,8 +136,8 @@ backup_resolv_conf() {
         return 0
     fi
     
-    if has_dns_fight; then
-        log_message "debug" "Skipping backup: DNS fight detected"
+    if is_resolv_conf_overwritten; then
+        log_message "debug" "Skipping backup: resolv.conf has been overwritten"
         return 0
     fi
     
@@ -187,12 +180,12 @@ soft_fix_resolv_conf() {
         # Wait briefly for Tailscale to detect changes
         sleep "$SOFT_FIX_WAIT"
         
-        # Check again if DNS fight has disappeared
-        if ! has_dns_fight; then
+        # Check again if resolv.conf is still overwritten
+        if ! is_resolv_conf_overwritten; then
             log_message "info" "Soft fix successful: DNS fight resolved"
             return 0
         else
-            log_message "warning" "Soft fix failed: DNS fight still present"
+            log_message "warning" "Soft fix failed: resolv.conf still overwritten"
             return 1
         fi
     else
@@ -231,12 +224,12 @@ hard_fix_tailscaled() {
         return 1
     fi
     
-    # Check if DNS fight has disappeared
-    if ! has_dns_fight; then
+    # Check if resolv.conf is still overwritten
+    if ! is_resolv_conf_overwritten; then
         log_message "info" "Hard fix successful: DNS fight resolved after restart"
         return 0
     else
-        log_message "warning" "Hard fix: DNS fight still present after restart"
+        log_message "warning" "Hard fix: resolv.conf still overwritten after restart"
         return 1
     fi
 }
@@ -262,12 +255,11 @@ calculate_retry_interval() {
     if [[ $count -le 0 ]]; then
         interval=$HARD_FIX_RETRY_BASE
     else
-        # Calculate 2^(count-1) using bit shift: 1 << (count-1)
-        local multiplier=$((1 << (count - 1)))
-        interval=$((HARD_FIX_RETRY_BASE * multiplier))
+        # Calculate multiplier = 2^(count-1)
+        interval=$((HARD_FIX_RETRY_BASE * 2 ** (count - 1)))
         
         # Cap at maximum
-        if [[ $interval -gt $HARD_FIX_RETRY_MAX ]]; then
+        if [[ $interval -gt $HARD_FIX_RETRY_MAX ]] || [[ $interval -eq 0 ]]; then
             interval=$HARD_FIX_RETRY_MAX
         fi
     fi
@@ -286,27 +278,30 @@ main_loop() {
     initialize
     
     while true; do
-        # Check if Tailscale is Running
-        if ! is_tailscale_running; then
-            log_message "debug" "Tailscale not Running, skipping check"
-            HARD_FIX_FAILURE_COUNT=0
-            sleep "$CHECK_INTERVAL"
-            continue
-        fi
-        
-        # Try to update backup (if conditions are met)
-        backup_resolv_conf
-        
-        # Check if DNS fight exists
-        if ! has_dns_fight; then
+        # Check if resolv.conf has been overwritten first (fast check, avoids unnecessary operations)
+        if ! is_resolv_conf_overwritten; then
             log_message "debug" "No DNS fight detected, system healthy"
             HARD_FIX_FAILURE_COUNT=0
+            
+            # Only try to update backup if Tailscale is Running (backup requires Running state)
+            if is_tailscale_running; then
+                backup_resolv_conf
+            fi
+            
             sleep "$CHECK_INTERVAL"
             continue
         fi
         
-        # DNS fight detected - attempt fixes
-        log_message "warning" "DNS fight detected: System DNS config not ideal"
+        # resolv.conf has been overwritten - check if Tailscale is Running before attempting fixes
+        if ! is_tailscale_running; then
+            log_message "debug" "Tailscale not Running, skipping fix attempts"
+            HARD_FIX_FAILURE_COUNT=0
+            sleep "$CHECK_INTERVAL"
+            continue
+        fi
+        
+        # resolv.conf overwritten and Tailscale is Running - attempt fixes
+        log_message "warning" "DNS fight detected: resolv.conf does not contain Tailscale marker"
         
         # Attempt soft fix
         if soft_fix_resolv_conf; then
