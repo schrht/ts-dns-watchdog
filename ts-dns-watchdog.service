@@ -13,10 +13,10 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=ts-dns-watchdog
 
-# 环境变量：检查间隔（秒）
+# Environment variable: check interval (seconds)
 Environment="CHECK_INTERVAL=30"
 
-# 安全设置
+# Security settings
 NoNewPrivileges=true
 PrivateTmp=true
 
